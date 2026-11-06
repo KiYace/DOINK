@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ryan-flan/DOINK/companion/internal/bridge"
 	"github.com/ryan-flan/DOINK/companion/internal/config"
 	"github.com/ryan-flan/DOINK/companion/internal/discord"
 	"github.com/ryan-flan/DOINK/companion/internal/savedvars"
@@ -69,6 +70,9 @@ func item(d Deps, e savedvars.Event) *wowhead.Item {
 // one. It returns false if they couldn't be posted; state is saved after
 // each message, so a retry resumes cleanly.
 func PostEvents(d Deps, key string, events []savedvars.Event, gameHooks map[string]string, firstSightBacklog int) bool {
+	if d.Config.APIURL != "" {
+		return postAPIEvents(d, key, events, firstSightBacklog)
+	}
 	url := WebhookFor(key, gameHooks, d.Config)
 	if len(events) > 0 && !d.Config.DryRun {
 		who := events[len(events)-1].FullName()
@@ -120,6 +124,35 @@ func PostEvents(d Deps, key string, events []savedvars.Event, gameHooks map[stri
 			}
 			d.State.MarkPosted(key, e.Seq, firstSightBacklog) // posted, or dropped for good
 		}
+	}
+	return true
+}
+
+// postAPIEvents uses the same state as the original Discord mode, but
+// only when api_url is configured. No Discord webhook is required.
+// The current Symfony endpoint supports player_died only; unsupported DOINK
+// events are intentionally skipped rather than blocking the event queue.
+func postAPIEvents(d Deps, key string, events []savedvars.Event, firstSightBacklog int) bool {
+	client := bridge.Client{Endpoint: d.Config.APIURL}
+	for _, e := range events {
+		if d.Config.DryRun {
+			d.Log.Info(fmt.Sprintf("%s: would send API event #%d %s", key, e.Seq, e.Type))
+			d.State.MarkPosted(key, e.Seq, firstSightBacklog)
+			continue
+		}
+		err := client.Send(context.Background(), e)
+		switch {
+		case errors.Is(err, bridge.ErrUnsupportedEvent):
+			d.Log.Info(fmt.Sprintf("%s: skipping API-unsupported event #%d %s", key, e.Seq, e.Type))
+		case err != nil:
+			d.Log.Error(fmt.Sprintf("%s: API delivery failed for #%d %s: %v", key, e.Seq, e.Type, err))
+			d.Status.Failed(fmt.Sprintf("Symfony API delivery failed for %s: %v", e.FullName(), err))
+			return false // leave current and later events pending for retry
+		default:
+			d.Log.Info(fmt.Sprintf("%s: sent API event #%d %s", key, e.Seq, e.Type))
+			d.Status.Posted(e.FullName(), e.Type)
+		}
+		d.State.MarkPosted(key, e.Seq, firstSightBacklog)
 	}
 	return true
 }

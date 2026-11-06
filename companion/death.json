@@ -1,0 +1,12 @@
+{
+  "seq": 42,
+  "ts": 1790000000,
+  "char": "Fenrir",
+  "realm": "Forever",
+  "level": 20,
+  "type": "death",
+  "data": {
+    "zone": "Westfall",
+    "killer": "Hogger"
+  }
+}

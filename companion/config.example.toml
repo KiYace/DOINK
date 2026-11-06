@@ -17,6 +17,13 @@
 # Webhook for characters without one set in game. Keep it secret.
 # webhook_url = "https://discord.com/api/webhooks/..."
 
+# Optional: deliver supported events to WoW AI Companion instead of Discord.
+# This is a destination switch, NOT simultaneous Discord + API delivery.
+# The Symfony API currently supports only death -> player_died.
+# All other event types are skipped in API mode until matching DTOs exist.
+# URL must be reachable from the computer running DOINK.
+# api_url = "http://127.0.0.1:8080/api/events"
+
 # Print embeds to the console or log instead of posting (same as --dry-run).
 # dry_run = false
 

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net/url"
 	"maps"
 	"math"
 	"os"
@@ -39,6 +40,7 @@ type Config struct {
 	StatePath           string
 	WowDir              string
 	WebhookURL          string // fallback when the game hasn't set one
+	APIURL              string // optional Symfony destination (takes precedence over Discord)
 	DryRun              bool
 	PollInterval        float64 // seconds
 	MaxBacklog          int
@@ -50,7 +52,7 @@ type Config struct {
 
 // knownKeys are the settings Load reads; anything else gets a warning.
 var knownKeys = []string{"savedvariables_path", "wow_dir", "webhook_url", "dry_run", "poll_interval",
-	"max_backlog", "wowhead", "update_check", "update_notify", "realtime", "notifiers"}
+	"max_backlog", "api_url", "wowhead", "update_check", "update_notify", "realtime", "notifiers"}
 
 // ErrNoWoW: no SavedVariables file to watch.
 var ErrNoWoW = errors.New("couldn't find World of Warcraft with the DOINK addon installed")
@@ -164,6 +166,7 @@ func Load(path string, dryRun bool) (*Config, error) {
 	svPath := str("savedvariables_path")
 	wowDir := str("wow_dir")
 	cfg.WebhookURL = str("webhook_url")
+	cfg.APIURL = str("api_url")
 	cfg.DryRun = boolean("dry_run", false) || dryRun
 	cfg.PollInterval = number("poll_interval", 2.0)
 	backlog := number("max_backlog", 10)
@@ -180,6 +183,12 @@ func Load(path string, dryRun bool) (*Config, error) {
 	cfg.MaxBacklog = int(backlog)
 	if cfg.PollInterval <= 0 {
 		return nil, fmt.Errorf("%s: poll_interval must be more than 0", path)
+	}
+	if cfg.APIURL != "" {
+		u, parseErr := url.Parse(cfg.APIURL)
+		if parseErr != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil {
+			return nil, fmt.Errorf("%s: api_url must be a full HTTP(S) URL without credentials", path)
+		}
 	}
 	if cfg.WebhookURL != "" && !discord.IsWebhookURL(cfg.WebhookURL) {
 		return nil, fmt.Errorf("%s: webhook_url doesn't look like a Discord webhook URL", path)
