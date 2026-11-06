@@ -2,6 +2,8 @@ package runner
 
 import (
 	"bytes"
+	"net/http"
+	"net/http/httptest"
 	"image/png"
 	"os"
 	"path/filepath"
@@ -163,6 +165,48 @@ func TestShotPostFailureKeepsTheFile(t *testing.T) {
 	}
 	if lastSeen(s, "Flano-R") != -1 {
 		t.Error("state advanced")
+	}
+}
+
+// A failed HTTP delivery must be retried during the same process lifetime,
+// without re-reading or deleting a successfully delivered screenshot.
+func TestShotAPIDeliveryRetriesWithoutRestart(t *testing.T) {
+	sf := newShotFixture(t)
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Method != http.MethodPost || r.URL.Path != "/api/events" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		if calls == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"accepted","event_type":"player_died"}`))
+	}))
+	defer server.Close()
+	sf.cfg.APIURL = server.URL + "/api/events"
+	payload := `{"char":"Flano","class":"WARRIOR","level":20,"data":{"zone":"Westfall"},"realm":"R","seq":5,"ts":1790870764,"type":"death"}`
+	path := sf.write("WoWScrnShot_110226_230648.png", pngOf(t, payload, false))
+	s := sf.state()
+
+	sf.scan(s) // 503: leave pending
+	if calls != 1 || !exists(path) || lastSeen(s, "Flano-R") != -1 {
+		t.Fatalf("first attempt: calls=%d exists=%t last_seen=%d", calls, exists(path), lastSeen(s, "Flano-R"))
+	}
+	sf.scan(s) // before retry deadline: no new HTTP request
+	if calls != 1 {
+		t.Fatalf("retried too soon: calls=%d", calls)
+	}
+	sf.now = sf.now.Add(deliveryRetry + time.Second)
+	sf.scan(s) // 200: consume screenshot and record delivery
+	if calls != 2 || exists(path) || lastSeen(s, "Flano-R") != 5 {
+		t.Fatalf("recovery: calls=%d exists=%t last_seen=%d", calls, exists(path), lastSeen(s, "Flano-R"))
+	}
+	sf.scan(s)
+	if calls != 2 {
+		t.Fatalf("sent duplicate after success: calls=%d", calls)
 	}
 }
 

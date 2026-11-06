@@ -27,6 +27,8 @@ const (
 	shotSettle = 500 * time.Millisecond
 	// shotRetry: an unreadable image this young is tried again next poll.
 	shotRetry = 10 * time.Second
+	// deliveryRetry: don't hammer an unavailable endpoint every scan.
+	deliveryRetry = 5 * time.Second
 )
 
 var shotName = regexp.MustCompile(`(?i)^WoWScrnShot_\d{6}_\d{6}(_\d+)?\.(jpe?g|png)$`)
@@ -61,18 +63,24 @@ type shotSig struct {
 	size  int64
 }
 
+type shotDeliveryRetry struct {
+	sig  shotSig
+	when time.Time
+}
+
 // Shots remembers which screenshots it has dealt with this run. Not safe
 // for concurrent use: Run owns it, on the same goroutine as Process, so
 // realtime posts and file posts never race.
 type Shots struct {
 	seen    map[string]shotSig
+	retry   map[string]shotDeliveryRetry // failed deliveries, retried without restart
 	scanned map[string]bool // folders scanned at least once
 	now     func() time.Time
 	decode  func(path string) (shot.Message, bool, error)
 }
 
 func NewShots() *Shots {
-	return &Shots{seen: map[string]shotSig{}, scanned: map[string]bool{},
+	return &Shots{seen: map[string]shotSig{}, retry: map[string]shotDeliveryRetry{}, scanned: map[string]bool{},
 		now: time.Now, decode: shot.DecodeFile}
 }
 
@@ -104,6 +112,9 @@ func (s *Shots) scanDir(d Deps, dir string, svPaths []string) {
 		if old, ok := s.seen[path]; ok && old == sig {
 			continue
 		}
+		if retry, ok := s.retry[path]; ok && retry.sig == sig && now.Before(retry.when) {
+			continue
+		}
 		age := now.Sub(info.ModTime())
 		if first && age > shotMaxAge {
 			s.seen[path] = sig
@@ -121,15 +132,23 @@ func (s *Shots) scanDir(d Deps, dir string, svPaths []string) {
 			d.Log.Debug(fmt.Sprintf("can't read screenshot %s: %v", entry.Name(), err))
 			continue
 		}
-		s.seen[path] = sig
 		if !ok {
+			s.seen[path] = sig
 			continue // the player's own screenshot
 		}
 		if msg.Hello {
+			s.seen[path] = sig
 			s.hello(d, path, msg.Payload)
 			continue
 		}
-		s.event(d, path, msg.Payload, svPaths)
+		if s.event(d, path, msg.Payload, svPaths) {
+			s.seen[path] = sig // delivered (or permanently invalid): don't reprocess
+			delete(s.retry, path)
+		} else {
+			// Keep the file pending. On the next scan after deliveryRetry,
+			// retry even if neither its contents nor its timestamp changed.
+			s.retry[path] = shotDeliveryRetry{sig: sig, when: now.Add(deliveryRetry)}
+		}
 	}
 }
 
@@ -147,16 +166,16 @@ func (s *Shots) hello(d Deps, path string, payload []byte) {
 	s.remove(d, path)
 }
 
-func (s *Shots) event(d Deps, path string, payload []byte, svPaths []string) {
+func (s *Shots) event(d Deps, path string, payload []byte, svPaths []string) bool {
 	e, err := savedvars.DecodeEvent(payload)
 	if err != nil {
 		d.Log.Warn(fmt.Sprintf("screenshot %s: bad event: %v", filepath.Base(path), err))
-		return
+		return true // malformed events are not transient delivery failures
 	}
 	key := e.Key()
 	if !d.State.IsPending(key, e.Seq) {
 		s.remove(d, path) // posted already (from the file, or before a restart)
-		return
+		return true
 	}
 	hooks := map[string]string{}
 	for _, sv := range svPaths {
@@ -166,11 +185,13 @@ func (s *Shots) event(d Deps, path string, payload []byte, svPaths []string) {
 			}
 		}
 	}
-	// On failure the file stays; the event posts from SavedVariables after
-	// the next /reload, and the next run deletes the screenshot.
-	if PostEvents(d, key, []savedvars.Event{e}, hooks, d.Config.MaxBacklog) {
-		s.remove(d, path)
+	// A transient HTTP failure leaves the file for another attempt in the
+	// current run; it can also be recovered through SavedVariables after /reload.
+	if !PostEvents(d, key, []savedvars.Event{e}, hooks, d.Config.MaxBacklog) {
+		return false
 	}
+	s.remove(d, path)
+	return true
 }
 
 func (s *Shots) remove(d Deps, path string) {
